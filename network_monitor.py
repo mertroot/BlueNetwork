@@ -52,32 +52,72 @@ class NetworkMonitor:
             return "Bulunamadı"
     
     def get_mac(self, ip):
-        """IP adresinden MAC adresini bulmaya çalışır (Windows için)"""
+        """IP adresinden MAC adresini bulmaya çalışır (ARP ve ICMP kullanarak)"""
+        # ICMP (ping) kullanarak ARP tablosunu güncelle
         try:
+            # Önce ICMP echo request (ping) gönder
+            subprocess.call(['ping', '-n', '1', '-w', '500', str(ip)], 
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            # Kısa bir bekleme süresi ekle (ARP tablosunun güncellenmesi için)
+            time.sleep(0.5)
+            
+            # Şimdi ARP tablosunu sorgula
             if platform.system().lower() == 'windows':
                 # ARP tablosunu sorgula
+                output = subprocess.check_output("arp -a", shell=True).decode('utf-8')
+                lines = output.strip().split('\n')
+                
+                # Tüm ARP tablosunu tara ve IP adresini bul
+                for line in lines:
+                    if str(ip) in line:
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            mac = parts[1].replace('-', ':')
+                            # Geçersiz MAC adreslerini filtrele
+                            if mac != "00:00:00:00:00:00" and not mac.startswith("ff:ff:ff"):
+                                print(f"MAC adresi bulundu: {ip} -> {mac}")
+                                return mac
+                    
+                # Hedef IP için özel ARP sorgusu
                 output = subprocess.check_output(f"arp -a {ip}", shell=True).decode('utf-8')
                 lines = output.strip().split('\n')
                 for line in lines:
-                    if ip in line:
+                    if str(ip) in line:
                         parts = line.split()
                         if len(parts) >= 2:
-                            return parts[1].replace('-', ':')
+                            mac = parts[1].replace('-', ':')
+                            if mac != "00:00:00:00:00:00" and not mac.startswith("ff:ff:ff"):
+                                print(f"Özel ARP sorgusu ile MAC adresi bulundu: {ip} -> {mac}")
+                                return mac
             else:  # Linux için
                 output = subprocess.check_output(f"arp -n {ip}", shell=True).decode('utf-8')
                 lines = output.strip().split('\n')
                 for line in lines:
-                    if ip in line:
+                    if str(ip) in line:
                         parts = line.split()
                         if len(parts) >= 3:
-                            return parts[2]
-        except Exception:
-            pass
-        return "Bulunamadı"
+                            mac = parts[2]
+                            if mac != "00:00:00:00:00:00" and not mac.startswith("ff:ff:ff"):
+                                return mac
+            
+            # Özel durumlar için MAC adresleri
+            if str(ip).endswith('.1'):
+                print(f"Router için varsayılan MAC adresi atanıyor: {ip}")
+                return "00:00:00:00:00:01"  # Router için özel bir MAC adresi
+                
+        except Exception as e:
+            print(f"MAC adresi alınırken hata: {e}")
+            
+            return "Bulunamadı"
     
-    def guess_device_type(self, hostname, mac):
-        """Hostname ve MAC adresinden cihaz tipini tahmin etmeye çalışır"""
-        hostname = hostname.lower()
+    def guess_device_type(self, hostname, mac, ip):
+        """Hostname, MAC adresi ve IP adresinden cihaz tipini tahmin etmeye çalışır"""
+        # Özel IP kontrolü - Router tespiti
+        if ip.endswith('.1') or ip.endswith('.254'):
+            return "Router/Modem"
+        
+        hostname = hostname.lower() if hostname != "Bulunamadı" else ""
         
         # Hostname'e göre tahmin
         if "printer" in hostname or "yazici" in hostname or "print" in hostname:
@@ -148,15 +188,20 @@ class NetworkMonitor:
                         return "Microsoft Cihazı"
                     else:
                         return f"{vendor} Cihazı"
+    
+        # Yerel bilgisayarı tespit et
+        if ip == self.local_ip:
+            return "Bu Bilgisayar"
         
         return "Bilinmeyen Cihaz"
     
     def scan_ip(self, ip):
         """Belirtilen IP'yi tarar ve aktifse bilgilerini toplar"""
         if self.ping(ip):
+            print(f"Aktif cihaz bulundu: {ip}")
             hostname = self.get_hostname(ip)
             mac = self.get_mac(ip)
-            device_type = self.guess_device_type(hostname, mac)
+            device_type = self.guess_device_type(hostname, mac, str(ip))
             
             with self.lock:
                 self.devices.append({
